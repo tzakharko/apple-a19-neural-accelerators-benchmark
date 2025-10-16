@@ -1,0 +1,9 @@
+.katex {
+    font-family: var(--md-text-font, "Noto Sans", sans-serif) !important;
+}
+
+.katex .mathnormal,
+.katex .text {
+    font-size: 0.75em;
+    font-family: inherit !important;
+}
