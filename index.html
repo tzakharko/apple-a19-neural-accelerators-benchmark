@@ -69,7 +69,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#apple-gpu-architecture" class="md-skip">
+        <a href="#investigating-the-gpu-neural-accelerators-on-apple-a19m5" class="md-skip">
           Skip to content
         </a>
       
@@ -193,6 +193,8 @@
       <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
       
       
+        
+      
       
         <label class="md-nav__link md-nav__link--active" for="__toc">
           
@@ -225,6 +227,8 @@
   
   
   
+    
+  
   
     <label class="md-nav__title" for="__toc">
       <span class="md-nav__icon md-icon"></span>
@@ -290,6 +294,15 @@
   <a href="#conclusions-and-outlook" class="md-nav__link">
     <span class="md-ellipsis">
       Conclusions and Outlook
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#references" class="md-nav__link">
+    <span class="md-ellipsis">
+      References
     </span>
   </a>
   
@@ -322,6 +335,8 @@
   
   
   
+    
+  
   
     <label class="md-nav__title" for="__toc">
       <span class="md-nav__icon md-icon"></span>
@@ -392,6 +407,15 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#references" class="md-nav__link">
+    <span class="md-ellipsis">
+      References
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -410,42 +434,44 @@
 
 
 
-  <h1>Investigating the GPU Neural Accelerators on Apple A19/M5</h1>
-
+<h1 id="investigating-the-gpu-neural-accelerators-on-apple-a19m5">Investigating the GPU Neural Accelerators on Apple A19/M5</h1>
+<p><em>Taras Zakharko, 15. October 2015</em></p>
+<p>On 19. September 2025, Apple released the iPhone 17 family. A particular highlight was the new A19 chips with "GPU Neural Accelerators", advertising up to 4x higher GPU AI compute compared to earlier hardware.  This marks the first appearance of dedicated matrix multiplication acceleration hardware on Apple GPUs and invites the question about the capabilities of these units and what they mean for the future of machine learning applications on Apple platforms.</p>
+<p>I was able to run some initial microbenchmarks on an iPhone 17 (A19 chip with 5 GPU cores) and will present my findings here. These results should also translate to the new M5 series chips. Note that my focus is on the peak performance of the Neural Accelerator hardware, without considering the problem of moving the data between the memory and the GPU. Real-world application performance might differ significantly. Apple also offers additional software frameworks that might make use of Neural Accelerators (e.g., Core ML), which I do not take into account here — I am only concerned with what is achievable using Metal Shading Language.</p>
 <p><strong>Key Takeaways:</strong></p>
 <table>
 <thead>
 <tr>
 <th>Operation</th>
-<th>Measured Peak Performance (A19, 5 GPU cores)</th>
-<th>Speedup over previous generation (iso-clock)</th>
-<th>Estimated M5 Max (40 cores)</th>
+<th>Measured  (A19, 5 GPU cores)</th>
+<th>Speedup over previous gen. (iso-clock)</th>
+<th>Estimated M5 Max (40 cores, ~1750 Mhz)</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td>SIMD FP32</td>
 <td>1880 GFLOPS</td>
-<td>1</td>
-<td>16 TFLOPS</td>
+<td>1x</td>
+<td>18 TFLOPS</td>
 </tr>
 <tr>
 <td>SIMD FP16</td>
 <td>3200 GFLOPS</td>
-<td>~0.7</td>
-<td>27 TFLOPS</td>
+<td>~0.7x</td>
+<td>30 TFLOPS</td>
 </tr>
 <tr>
 <td>Matrix FP16 (accumulating into FP16/FP32)</td>
 <td>7500 GFLOPS</td>
 <td>~4x</td>
-<td>63 TFLOPS</td>
+<td>70 TFLOPS</td>
 </tr>
 <tr>
 <td>Matrix INT8 (accumulating into INT32)</td>
 <td>13500 GFLOPS</td>
 <td>~7.5x</td>
-<td>113 TFLOPS</td>
+<td>130 TFLOPS</td>
 </tr>
 </tbody>
 </table>
@@ -461,6 +487,12 @@
 </div>
 <h2 id="apple-gpu-architecture">Apple GPU Architecture</h2>
 <p>Modern GPUs are massively parallel processors that rely on wide SIMD (single instruction, multiple data) execution to maximize the compute density, and Apple GPUs are no exception. The native execution width of Apple hardware is 32, with arithmetic instructions operating on 32 data elements in parallel. The programming model presents this as multiple threads running the same shader code but potentially different data, with groups of 32 threads executing in lockstep and able to communicate (e.g., read each other's data) directly. Apple Metal refers to these execution groups as SIMD-groups (other mainstream designations include "wavefronts" and "warps"). Multiple SIMD-groups can be organized into threadgroups that have access to fast shared memory but require explicit synchronization. Finally, multiple threadgroups can be launched as part of the same compute kernel, but cannot directly synchronize their work and need to communicate using global memory and atomic memory operations.</p>
+<figure id="__figure-caption_1">
+<p><a class="glightbox" data-type="image" data-width="auto" data-height="auto" href="assets/apple-gpu-diagram.svg" data-desc-position="bottom"><img alt="Image title" src="assets/apple-gpu-diagram.svg"></a></p>
+<figcaption>
+<p><span class="caption-prefix">Figure 1.</span> Apple Silicon GPU Architecture Diagram (simplified)</p>
+</figcaption>
+</figure>
 <p>This logical organization is directly reflected in the hardware organization (Figure 1). The basic building block is a compute partition, responsible for executing shader programs. Each compute partition consists of an instruction dispatch circuitry, execution circuitry (SIMD units), register cache, and additional supporting hardware and state (e.g., raytracing and texture sampling, omitted here for brevity). The execution circuitry consists of multiple physically distinct execution SIMD datapaths that handle instructions of different types. Experimental evidence and Apple WWDC presentations suggest that these include at least a full-precision floating point FMA pipe, a half-precision floating point FMA pipe, and an integer ADD pipe, plus potentially others. Blocks of four compute partitions are organized into GPU cores and share the fast local cache memory. A threadgroup is executed on a single GPU core, using the four compute partitions to provide within-threadgroup parallelism. Furthermore, each GPU core will execute instructions from several different threadgroups concurrently, switching between threads every cycle to maximize hardware occupancy and hide execution latencies. Therefore, the GPU relies on constantly being fed work in order to maintain high execution efficiency.</p>
 <p>From the compute perspective, each partition therefore contains 32 FP32 multiply-accumulate units and is capable of performing 64 FLOPS per cycle (32 combined multiplications+additions). For a GPU core, this means 128 FP32 FMA units or 256 FLOPS per cycle. Note that this is only a theoretical maximum for FP32 performance, and actual shader performance can differ significantly depending on the instruction mix and memory access patterns. With newer Apple GPUs, the achievable performance can also occasionally be higher due to the ability to issue multiple instructions simultaneously (see below).</p>
 <p>While the basic GPU core organization remained unchanged at least since A14/M1 (perhaps even earlier), there have been significant changes to the compute units and memory hierarchy over the years. Apple Family 9 GPUs (featured in A17 Pro/M3/M4 series of chips) introduced two major improvements to shader execution. The first is the ability to issue two instructions per clock to different datapaths from a single compute partition. For example, full-precision (FP32) instructions can be issued simultaneously with half-precision (FP16) or integer (INT) instructions, effectively improving runtime performance. The second is the introduction of dynamic shader memory management (which Apple dubs "Dynamic Caching") that allows all memory resources, including registers, shared memory, texture memory, and more, to be backed by the L2 cache and allocated dynamically. This feature can improve hardware occupancy for complex shaders that have different resource needs depending on some runtime parameter (e.g., a branch condition). For more information, refer to the <a href="https://developer.apple.com/videos/play/tech-talks/111375/">Explore GPU advancements in M3 and A17 Pro (Apple Tech Talk)</a>.</p>
@@ -523,7 +555,7 @@
 </figure>
 <p>Configurable execution scope is a particularly interesting feature, as it allows the programmer to choose between different execution modes. There is a thread-scope, where each thread performs its own matrix multiplication — probably most useful for small matrices with divergent execution flow, e.g., for graphical tasks. The SIMD-groups scope is a classical hardware-accelerated cooperative matrix multiplication mode, where all threads in a compute partition concurrently work towards producing the result. This scope can also be configured to involve multiple parallel SIMD-groups, presumably pooling the hardware resources of several partitions, but in my experiments, this always resulted in a significant performance drop. This will likely be fixed in a future update.</p>
 <p>The MPP framework requires the output matrix size (tile size) to be fixed at compile time by providing the constants <span class="arithmatex">\(M\)</span> and <span class="arithmatex">\(N\)</span>. The remaining input matrix dimension can be either a constant or determined dynamically from the input tensors' shape. While the framework is quite flexible in setting up the dimensions, it seems that only a few choices work well in practice. Using too small or too large matrices generally resulted in a poor performance or a shader compilation error. Some dimensions produced wrong results (which appears to be a bug with masking out unused lanes in the dot product hardware). Performance figures for different tile sizes are presented further down.</p>
-<p>The framework supports several data types as inputs and outputs for matrix operations. Hardware-accelerated data formats include FP16 (with FP16 or FP32 output) and INT8 (with INT32 output). Although undocumented, FP32 is supported as well, but appears to run using the general-purpose SIMD pipe on the A19. A notable omission is the Bfloat16 format — it is unclear whether the first-generation Neural Accelerator hardware lacks dedicated support for this format or whether it is not yet exposed in the Metal Shading Language.</p>
+<p>The framework supports several data types as inputs and outputs for matrix operations. Hardware-accelerated data formats include FP16 (with FP16 or FP32 output) and INT8 (with INT32 output). Although undocumented, FP32 is supported as well, but appears to run using the general-purpose SIMD pipe on the A19. A notable omission is the bfloat16 format — it is unclear whether the first-generation Neural Accelerator hardware lacks dedicated support for this format or whether it is not yet exposed in the Metal Shading Language.</p>
 <p>Finally, the output of the matrix multiplication operation can be either a tensor object (usually stored in device memory) or a special <code>cooperative_tensor</code> object that partitions the tensor storage among all participating threads in an implementation-defined way (this is similar to "matrix fragments" in Nvidia PTX). Cooperative tensors are useful when performing multiple operations in a sequence or post-processing the output, since the data resides in local registers and is very fast to access. Perhaps surprisingly, cooperative tensors currently cannot be used as inputs for matrix multiplication.</p>
 <h2 id="experimental-setup">Experimental Setup</h2>
 <p>To measure the peak performance of Neural Accelerators, I have set up a simple testing framework using Swift and Metal Shading Language. The code is available in the project repository. A helper function is used to generate and build specialized matrix multiplication kernels for the given matrix dimensions and data types. We then launch a very large number of threadgroups and measure the elapsed time. Since we are interested in peak performance, special care is taken to ensure that memory access overhead is negligible:</p>
@@ -537,20 +569,20 @@
 \]</div>
 <p>These tests are performed for the supported input data types (FP16 and INT8) with supported accumulator types. We also test a variety of matrix dimensions for <span class="arithmatex">\(M, N \in\)</span> {8, 16, 32} and <span class="arithmatex">\(K \in\)</span> {8, 16, 32, 64, 128}. As choosing certain matrix dimensions produces invalid results on A19, we also validate the kernel output by comparing it with a reference implementation. Invalid results are discarded. To account for variance in measurements, we repeat each test multiple times and take the highest measured value. The tests were performed on an A19 chip with 5 GPU cores (iPhone 17), with reference data provided using a M3 Max MacBook Pro and a M4 iPad Pro. The A19 tests were performed outdoors during a particularly cold Swiss autumn evening to help with the thermal performance, which might have been more of a placebo than not.</p>
 <h2 id="results-for-fp16">Results for FP16</h2>
-<p>MPP supports matrix multiplication for FP16 inputs using a FP16 or a FP32 accumulator matrix. The performance remains the same for both accumulator types. This is in contrast to some other implementations, which offer higher performance when a FP16 accumulator is used (e.g., Nvidia Tensor Cores). The performance is highly dependent on the matrix dimensions (see the following sections for a more detailed discussion). The results are summarized in Figure 1 below. The output matrix (tile) dimensions are <span class="arithmatex">\(M\)</span> (rows) and <span class="arithmatex">\(N\)</span> (columns). The number <span class="arithmatex">\(K\)</span> is the other dimension of the input matrices (columns for the first matrix and rows for the second matrix). We only show the results for the FP32 accumulator since they are identical to the FP16 accumulator.</p>
-<figure id="__figure-caption_1">
+<p>MPP supports matrix multiplication for FP16 inputs using a FP16 or a FP32 accumulator matrix. The performance remains the same for both accumulator types. This is in contrast to some other implementations, which offer higher performance when a FP16 accumulator is used (e.g., Nvidia Tensor Cores). The performance is highly dependent on the matrix dimensions (see the following sections for a more detailed discussion). The results are summarized in Figure 2 below. The output matrix (tile) dimensions are <span class="arithmatex">\(M\)</span> (rows) and <span class="arithmatex">\(N\)</span> (columns). The number <span class="arithmatex">\(K\)</span> is the other dimension of the input matrices (columns for the first matrix and rows for the second matrix). We only show the results for the FP32 accumulator since they are identical to the FP16 accumulator.</p>
+<figure id="__figure-caption_2">
 <p><a class="glightbox" data-type="image" data-width="auto" data-height="auto" href="assets/mma_fp16_fp32.svg" data-desc-position="bottom"><img alt="Image title" src="assets/mma_fp16_fp32.svg"></a></p>
 <figcaption>
-<p><span class="caption-prefix">Figure 1.</span> A19 Neural Accelerator Performance for FP16 Matrix Multiplication with FP32 Accumulator</p>
+<p><span class="caption-prefix">Figure 2.</span> A19 Neural Accelerator Performance for FP16 Matrix Multiplication with FP32 Accumulator</p>
 </figcaption>
 </figure>
 <p>The peak measured throughput is approximately 7.4 TFLOPS for the 5-core A19 smartphone chip. Given the estimated GPU clock frequency of 1460 MHz, each core provides around 1000 FLOPS of matrix multiplication throughput per cycle. This number is very close to 1024 FLOPS, or 128 dot product FMA operations per cycle per compute partition. As mentioned previously, this is very similar to the 4-way 32-wide dot product accelerator described in a published patent, and too close a number to be a coincidence. Even if the hardware implementation details differ, I believe it is safe to conclude that we have <span class="arithmatex">\(128\)</span> matrix FMAs per partition.</p>
 <h2 id="results-for-int8">Results for INT8</h2>
-<p>MPP supports matrix multiplication for INT8 inputs using a FP32 accumulator matrix. As previously mentioned, the performance is highly dependent on the matrix dimensions. The results are summarized in Figure 2 below. The output matrix (tile) dimensions are <span class="arithmatex">\(M\)</span> (rows) and <span class="arithmatex">\(N\)</span> (columns). The number <span class="arithmatex">\(K\)</span> is the other dimension of the input matrices (columns for the first matrix and rows for the second matrix).</p>
-<figure id="__figure-caption_2">
+<p>MPP supports matrix multiplication for INT8 inputs using a FP32 accumulator matrix. As previously mentioned, the performance is highly dependent on the matrix dimensions. The results are summarized in Figure 3 below. The output matrix (tile) dimensions are <span class="arithmatex">\(M\)</span> (rows) and <span class="arithmatex">\(N\)</span> (columns). The number <span class="arithmatex">\(K\)</span> is the other dimension of the input matrices (columns for the first matrix and rows for the second matrix).</p>
+<figure id="__figure-caption_3">
 <p><a class="glightbox" data-type="image" data-width="auto" data-height="auto" href="assets/mma_i8_i32.svg" data-desc-position="bottom"><img alt="Image title" src="assets/mma_i8_i32.svg"></a></p>
 <figcaption>
-<p><span class="caption-prefix">Figure 2.</span> A19 Neural Accelerator Performance for INT8 Matrix Multiplication with INT32 Accumulator</p>
+<p><span class="caption-prefix">Figure 3.</span> A19 Neural Accelerator Performance for INT8 Matrix Multiplication with INT32 Accumulator</p>
 </figcaption>
 </figure>
 <p>The peak measured throughput is approximately 13.4 TOPS, just short of a double compared to the FP16 figures. Given the estimated GPU clock frequency of 1460 MHz, this translates to approximately 1900 OPS per GPU core per cycle. Unlike before, this is not a very nice power of two number, but it is sufficiently close to 2048, which is a power of two. It would be convenient to assume 2048 OPS per core per cycle, since that would translate to a plausible 256 dot product MAC (integer multiply and accumulate) — double of FP16 compute. Still, I am a bit uneasy about making this jump given the larger discrepancy between this plausible value and the measured value. It is possible that the GPU throttles slightly while running the Neural Accelerator hardware in INT mode, which would explain a slightly lower performance. I did obtain a measurement of over 14 TOPS during some preliminary benchmark runs, but was not able to replicate it using the final version of the benchmark suite. At any rate, we do observe a noticeable improvement over FP16 implementation, suggesting that Apple has actually undersold the capability of these chips in their marketing materials.</p>
@@ -564,19 +596,29 @@
 <li>~2048 OPS per GPU core per cycle for INT8 matrix operations</li>
 <li>Optimal matrix tile size of approximately 32 <span class="arithmatex">\(\times\)</span> 32</li>
 </ul>
-<p>In particular, I'd like to highlight the strong FP16 performance with FP32 accumulators, which compares favorably with the current state of the art implementations. On the other hand, INT8 performance lags behind, and support for BFloat16 and additional reduced-precision ML-optimized data types is lacking. Regardless, the performance improvements are significant (the A19 iPhone GPU matches my M3 Max MacBook Pro for FP16  matrix multiplication!), which should make M5-based machines much more attractive for ML applications, especially when paired with larger unified memory pools than other consumer systems.</p>
+<p>In particular, I'd like to highlight the strong FP16 performance with FP32 accumulators, which compares favorably with the current state of the art implementations. On the other hand, INT8 performance lags behind, and support for bfloat16 and additional reduced-precision ML-optimized data types is lacking. Regardless, the performance improvements are significant (the A19 iPhone GPU matches my M3 Max MacBook Pro for FP16  matrix multiplication!), which should make M5-based machines considerably more attractive for ML applications, especially when paired with larger unified memory pools compared to other consumer systems.</p>
 <p>The results presented here focused on hardware capability and peak performance. Real-world applications are more complex because they also need to move data to and from the device memory. Based on simple napkin math, the required data bandwidth far exceeds the capabilities of current memory interfaces. A single half-precision 32 <span class="arithmatex">\(\times\)</span> 32 matrix is 2KB of data, so 4KB needs to be fetched per compute partition every 256 cycles to keep the Neural Accelerators fully utilized.  That's 16 bytes per cycle per partition or 64 bytes per cycle for a single GPU core. At the GPU clock frequency of 1460 MHz, this translates to 93.44 GB/s inbound bandwidth per GPU core. In comparison, the new M5 Mac has ~ 150 GB/s for 10 GPU cores. State-of-the-art algorithms for Nvidia hardware rely on sophisticated data prefetching and caching strategies. It would be interesting to explore how these ideas can be adapted to the Apple Silicon architecture and the new Metal 4 Tensor APIs.</p>
+<h2 id="references">References</h2>
+<ul>
+<li><a href="https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf">Metal Shading Language Reference, Version 4</a></li>
+<li><a href="https://dougallj.github.io/applegpu/docs.html">Apple G13 GPU Architecture Reference by Dougall Johnson</a></li>
+<li><a href="https://developer.apple.com/videos/play/tech-talks/111375/">Explore GPU advancements in M3 and A17 Pro (Apple Tech Talk)</a></li>
+<li><a href="https://patentscope.wipo.int/search/en/detail.jsf?docId=WO2025071810">Matrix Multiplier Caching (Patent  WO2025071810)</a></li>
+<li><a href="https://patentscope.wipo.int/search/en/detail.jsf?docId=US453093419">Operand Selection Circuitry (Patent US20250110734)</a></li>
+<li><a href="https://alexarmbr.github.io/2024/08/10/How-To-Write-A-Fast-Matrix-Multiplication-From-Scratch-With-Tensor-Cores.html">How To Write A Fast Matrix Multiplication From Scratch With Tensor Cores</a></li>
+<li><a href="https://www.aleksagordic.com/blog/matmul">Inside NVIDIA GPUs: Anatomy of High Performance Matmul Kernels</a></li>
+</ul>
 <div class="footnote">
 <hr>
 <ol>
 <li id="fn:1">
-<p>The frequency was estimated by measuring the maximal achievable throughput of an FMA chain kernel, which tops out at around <span class="arithmatex">\(1880 GFLOPS\)</span>. With <span class="arithmatex">\(128\)</span> FMA pipelines per core (<span class="arithmatex">\(640\)</span> pipelines in total) and two FLOPS per pipeline, this results in <span class="arithmatex">\(1880/(640*2) \approx 1.46\)</span> GHz.&nbsp;<a class="footnote-backref" href="#fnref:1" title="Jump back to footnote 1 in the text">↩</a></p>
+<p>The frequency was estimated by measuring the maximal achievable throughput of an FMA chain kernel, which tops out at around <span class="arithmatex">\(1880 GFLOPS\)</span>. With <span class="arithmatex">\(128\)</span> FMA pipelines per core (<span class="arithmatex">\(640\)</span> pipelines in total) and two FLOPS per pipeline, this results in <span class="arithmatex">\(1880/(640*2) \approx 1.46\)</span> GHz. Note that this is a non-pro A19, the A19 Pro reportedly runs a 10% higher clock frequency.&nbsp;<a class="footnote-backref" href="#fnref:1" title="Jump back to footnote 1 in the text">↩</a></p>
 </li>
 <li id="fn:2">
 <p>Metal stores matrices in row-major order, which means that the matrix dimensions are reversed for a tensor. The first dimension specifies the number of columns (elements per row), and the second dimension specifies the number of rows. This does not appear to be currently documented and can be somewhat confusing.&nbsp;<a class="footnote-backref" href="#fnref:2" title="Jump back to footnote 2 in the text">↩</a></p>
 </li>
 <li id="fn:3">
-<p>Each matrix multiplication needs <span class="arithmatex">\(MNK\)</span> FMA operations, and an FMA counts as two operations (multiplication and addition). We repeat this 64 times.&nbsp;<a class="footnote-backref" href="#fnref:3" title="Jump back to footnote 3 in the text">↩</a></p>
+<p>Each matrix multiplication requires <span class="arithmatex">\(MNK\)</span> FMA operations, and an FMA counts as two operations (multiplication and addition). We repeat this 64 times.&nbsp;<a class="footnote-backref" href="#fnref:3" title="Jump back to footnote 3 in the text">↩</a></p>
 </li>
 </ol>
 </div>
